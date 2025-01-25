@@ -394,18 +394,18 @@ class RQspline(nn.Module):
 
         #linear extrapolation
         select0 = index == 0
-        dim = torch.repeat_interleave(torch.arange(self.ndim).view(1,-1), len(x), dim=0)[select0]
+        dim = torch.repeat_interleave(torch.arange(self.ndim).view(1,-1).to(x.device), len(x), dim=0)[select0]
         y[select0] = yy[dim, 0] + (x[select0]-xx[dim, 0]) * delta[dim, 0]
         logderiv[select0] = self.logderiv[dim, 0]
         selectn = index == self.nknot
-        dim = torch.repeat_interleave(torch.arange(self.ndim).view(1,-1), len(x), dim=0)[selectn]
+        dim = torch.repeat_interleave(torch.arange(self.ndim).view(1,-1).to(x.device), len(x), dim=0)[selectn]
         y[selectn] = yy[dim, -1] + (x[selectn]-xx[dim, -1]) * delta[dim, -1]
         logderiv[selectn] = self.logderiv[dim, -1]
 
         #rational quadratic spline
         select = ~(select0 | selectn)
         index = index[select]
-        dim = torch.repeat_interleave(torch.arange(self.ndim).view(1,-1), len(x), dim=0)[select]
+        dim = torch.repeat_interleave(torch.arange(self.ndim).view(1,-1).to(x.device), len(x), dim=0)[select]
         xi = (x[select] - xx[dim, index-1]) / (xx[dim, index] - xx[dim, index-1])
         s = (yy[dim, index]-yy[dim, index-1]) / (xx[dim, index]-xx[dim, index-1])
         xi1_xi = xi*(1-xi)
