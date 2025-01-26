@@ -1,0 +1,10 @@
+kernel = 3
+n_layers = 5
+n_kernel_knots = 8
+n_nonlinearity_knots = 8
+imShape = [1, 8, 8]
+y_learn_top = True
+weight_decay = 0.
+lr = 1e-2
+batch_size = 32
+noise_level = 0.0

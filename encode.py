@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from model import InvariantFlowModel
+from src.model import InvariantFlowModel
 from importlib.machinery import SourceFileLoader
 import argparse
 
@@ -48,4 +48,4 @@ if __name__ == "__main__":
     print(sum(p.numel() for p in model.parameters() if p.requires_grad), ' Parameters')
     model.load_state_dict(torch.load(args.model_path, map_location=torch.device('cpu')))
     model.eval() 
-    encode(args, model, device, image_shape=p.imShape)
+    encode(args, model, device, num_samples=8, image_shape=p.imShape)

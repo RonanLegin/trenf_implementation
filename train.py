@@ -6,7 +6,7 @@ from importlib.machinery import SourceFileLoader
 from torch.utils.data import TensorDataset, DataLoader
 
 import torch.optim as optim
-from model import InvariantFlowModel
+from src.model import InvariantFlowModel
 
 import argparse
 import time
@@ -25,7 +25,7 @@ def main(args):
     if not os.path.exists("saves/"):
         os.makedirs("saves/")
 
-    p = SourceFileLoader('cf', 'config_kappa.py').load_module()
+    p = SourceFileLoader('cf', 'config.py').load_module()
     model = InvariantFlowModel(image_shape=p.imShape, n_layers=p.n_layers, learn_top=p.y_learn_top).to(device)
     print(sum(p.numel() for p in model.parameters() if p.requires_grad), ' Parameters')
     model.train()
@@ -67,6 +67,6 @@ def main(args):
             torch.save(model.state_dict(), f'saves/{fName}-model.pt')
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--data_path', type=str, default="data/test_kappa_[3]kev_0.npy", help='train level')
+parser.add_argument('--data_path', type=str, help='train data path')
 args = parser.parse_args()
 main(args)

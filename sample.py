@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from model import InvariantFlowModel
+from src.model import InvariantFlowModel
 from importlib.machinery import SourceFileLoader
 import argparse 
 
@@ -28,7 +28,6 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path', type=str, help='data path')
     parser.add_argument('--model_path', type=str, help='model path')
     args = parser.parse_args()
 
@@ -37,4 +36,4 @@ if __name__ == "__main__":
     print(sum(p.numel() for p in model.parameters() if p.requires_grad), ' Parameters')
     
     model.load_state_dict(torch.load(args.model_path, map_location=torch.device('cpu'))) 
-    sample(model, device, image_shape=p.imShape)
+    sample(model)
