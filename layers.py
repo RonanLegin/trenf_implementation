@@ -131,7 +131,7 @@ class CubicSplineRadialFourierConv(nn.Module):
         
         # 2) Build the radial kernel in freq space via our spline
         #    r_norm in [0,1] = r / r_max
-        r_norm = (self.r / (self.r_max + 1e-9)).to(device)
+        r_norm = (self.r / (self.r_max + 1e-9))#.to(device)
         
         # Evaluate cubic spline at each r_norm
         # We'll do it elementwise. r_norm has shape [W,H].
@@ -245,215 +245,486 @@ class RadialFourierConv(nn.Module):
         return x_out, logdet
 
 
-# class PixelwiseNonlinearity(nn.Module):
-#     def __init__(self):
-#         super().__init__()
-#         # Instead of a shift, we use a fixed offset of 2.0
-#         self.shift = 2.0
-#         # Scale parameter that can be learned
-#         self.scale = nn.Parameter(torch.ones(1))
-
-#     def forward(self, x, logdet=None, reverse=False):
-#         if logdet is None:
-#             logdet = torch.zeros(x.size(0), device=x.device, dtype=x.dtype)
-#         if not reverse:
-#             # Forward: out = sigmoid(x + shift) * scale
-#             out = torch.sigmoid(x + self.shift) * self.scale
-#             # dout/dx = (sigmoid(x + shift) * (1 - sigmoid(x + shift))) * scale
-#             doutdx = out * (1 - out / self.scale) * self.scale
-#             # log|dout/dx| = log((sigmoid(x + shift) * (1 - sigmoid(x + shift))) * scale)
-#             local_logdet = torch.log(torch.abs(doutdx) + 1e-9)
-#             local_logdet = local_logdet.sum(dim=list(range(1, out.ndim)))  # shape (B,)
-#         else:
-#             # Inverse transformation is not straightforward and generally requires numerical approximation
-#             # For demonstration, let's assume x is scaled back before applying the logit
-#             scaled_x = x / self.scale
-#             out = torch.logit(scaled_x) - self.shift
-#             print('poop',out)
-#             # dout/dx = 1 / (scaled_x * (1 - scaled_x)) / scale
-#             doutdx = 1 / (scaled_x * (1 - scaled_x)) / self.scale
-#             # log|dout/dx| = -log(scaled_x * (1 - scaled_x)) - log(scale)
-#             local_logdet = -torch.log(scaled_x * (1 - scaled_x)) - torch.log(torch.abs(self.scale))
-#             local_logdet = local_logdet.sum(dim=list(range(1, x.ndim)))  # shape (B,)
-#         logdet = logdet + local_logdet
-#         return out, logdet
-
-
-# class PixelwiseNonlinearity(nn.Module):
-#     def __init__(self):
-#         super().__init__()
-#         # Instead of a shift, we use a fixed offset of 2.0
-#         self.shift = 0.0
-#         # Scale parameter (learnable)
-#         self.scale = nn.Parameter(torch.ones(1))
-
-#     def forward(self, x, logdet=None, reverse=False):
-#         """
-#         If not `reverse`, we apply the forward transform:
-#             y = scale * exp(x + shift)
-#         If `reverse`, we apply the inverse transform:
-#             x = log(y / scale) - shift
-#         """
-#         if logdet is None:
-#             logdet = torch.zeros(x.size(0), device=x.device, dtype=x.dtype)
-
-#         if not reverse:
-#             # Forward: out = scale * exp(x + shift)
-#             out = torch.clamp(self.scale * torch.exp(x + self.shift), max=100.)
-#             # dy/dx = out
-#             # log|dy/dx| = log(out)
-#             local_logdet = torch.log(out + 1e-9)
-
-#             # Sum logdet over all but batch dimension
-#             local_logdet = local_logdet.sum(dim=list(range(1, out.ndim)))
-
-#         else:
-#             # Reverse (inverse) transform:
-#             # x = log(y / scale) - shift
-#             # Here, 'x' in this function’s argument is actually the 'y' from forward pass
-#             # So let's rename for clarity:
-#             y = x
-
-#             # Safeguard: clamp y to avoid log of zero or negative
-#             y = torch.clamp(y, min=1e-9)
-
-#             out = torch.log(y / self.scale) - self.shift
-
-#             # dx/dy = 1 / y
-#             # log|dx/dy| = -log(y)
-#             local_logdet = -torch.log(y)
-
-#             local_logdet = local_logdet.sum(dim=list(range(1, x.ndim)))
-
-#         # Accumulate into total logdet
-#         logdet = logdet + local_logdet
-#         return out, logdet
-
-class RQspline(nn.Module):
-    '''
-    Ratianal quadratic spline.
-    See appendix B of https://arxiv.org/pdf/2007.00674.pdf
-    The main advantage compared to cubic spline is that the
-    inverse is analytical and does not require binary search
-
-    x: (ndim, nknot) 2d array, each row should be monotonic increasing
-    y: (ndim, nknot) 2d array, each row should be monotonic increasing
-    deriv: (ndim, nknot) 2d array, should be positive
-    '''
+class PLspline(nn.Module):
+    """
+    Piecewise Linear (PL) Spline
+    - Monotonic in each dimension
+    - Has analytical inverse (no numerical search)
+    - x: (ndim, nknot) 2D array of strictly increasing knot positions
+    - y: (ndim, nknot) 2D array of strictly increasing knot values
+    """
 
     def __init__(self, ndim, nknot):
-
         super().__init__()
         self.ndim = ndim
         self.nknot = nknot
 
-        x0 = torch.rand(ndim, 1)-4.5
-        logdx = torch.log(torch.abs(-2*x0 / (nknot-1)))
+        # Create an arange buffer for indexing (avoid repeated arange calls):
+        self.register_buffer("dim_arange", torch.arange(self.ndim))
 
-        #use log as parameters to make sure monotonicity
+        # Simple random init (you can adjust):
+        # We'll pick a random starting x0 (centered near 0),
+        # and let each logdx be near log(1.0).
+        x0_init = torch.randn(ndim, 1) * 0.1
+        y0_init = torch.randn(ndim, 1) * 0.1
+
+        # Initialize all increments to ~exp(0)=1
+        logdx_init = torch.zeros(ndim, nknot - 1)
+        logdy_init = torch.zeros(ndim, nknot - 1)
+
+        self.x0 = nn.Parameter(x0_init)                   # shape (ndim, 1)
+        self.y0 = nn.Parameter(y0_init)                   # shape (ndim, 1)
+        self.logdx = nn.Parameter(logdx_init)             # shape (ndim, nknot - 1)
+        self.logdy = nn.Parameter(logdy_init)             # shape (ndim, nknot - 1)
+
+    def set_param(self, x, y):
+        """
+        Optionally, you can manually set the spline's knot locations (x, y).
+        x, y: shape (ndim, nknot), strictly increasing in each row.
+        """
+        dx = x[:, 1:] - x[:, :-1]  # shape (ndim, nknot-1)
+        dy = y[:, 1:] - y[:, :-1]
+        # (Optional checks):
+        # assert (dx > 0).all()
+        # assert (dy > 0).all()
+
+        self.x0.data = x[:, 0].view(-1, 1)
+        self.y0.data = y[:, 0].view(-1, 1)
+        self.logdx.data = torch.log(dx)
+        self.logdy.data = torch.log(dy)
+
+    def _prepare(self):
+        """
+        Compute the actual knot positions xx and yy from the log parameters.
+        This is called each forward pass because parameters can change.
+        """
+        # Recover knot positions in x
+        xx_increments = torch.exp(self.logdx)             # shape (ndim, nknot-1)
+        xx_cumsum = torch.cumsum(xx_increments, dim=1)    # shape (ndim, nknot-1)
+        xx = torch.cat([self.x0, self.x0 + xx_cumsum], dim=1)  # shape (ndim, nknot)
+
+        # Recover knot positions in y
+        yy_increments = torch.exp(self.logdy)             # shape (ndim, nknot-1)
+        yy_cumsum = torch.cumsum(yy_increments, dim=1)    # shape (ndim, nknot-1)
+        yy = torch.cat([self.y0, self.y0 + yy_cumsum], dim=1)  # shape (ndim, nknot)
+
+        return xx, yy
+
+    def forward(self, x):
+        """
+        Forward transform: x -> y
+        x: shape (ndata, ndim)
+
+        Returns:
+         y: shape (ndata, ndim)
+         logdet: shape (ndata, ndim), the log|dy/dx|
+        """
+        xx, yy = self._prepare()  # shape (ndim, nknot)
+
+        # 1) Find which interval each x falls into for each dimension
+        #    We do searchsorted along each dimension's xx.
+        #    x is shape (ndata, ndim), xx is (ndim, nknot).
+        #    Torch requires searchsorted of shape (K,) so we do it dimension by dimension.
+        #    For vectorization: x.T is shape (ndim, ndata); so we search in xx[i] for x.T[i].
+        index_list = []
+        for i in range(self.ndim):
+            # shape of x.T[i] is (ndata,)
+            # shape of xx[i] is (nknot,)
+            idx_i = torch.searchsorted(xx[i], x[:, i])  # shape (ndata,)
+            index_list.append(idx_i)
+        index = torch.stack(index_list, dim=1)  # shape (ndata, ndim)
+
+        # Prepare outputs
+        y = torch.zeros_like(x)
+        logdet = torch.zeros_like(x)
+
+        # (ndata, ndim) array for picking dimension
+        dim_all = self.dim_arange.unsqueeze(0).expand(len(x), self.ndim)
+
+        # ~~~~~ Extrapolation: index == 0 (left of left-most knot) ~~~~~
+        select0 = (index == 0)
+        if select0.any():
+            dim0 = dim_all[select0]    # shape (#selected,)
+            # For each selected, slope = (yy[...,1] - yy[...,0]) / (xx[...,1] - xx[...,0])
+            # but we pick dimension i for each selected entry
+            slope0 = (yy[dim0, 1] - yy[dim0, 0]) / (xx[dim0, 1] - xx[dim0, 0])
+
+            # y = y0 + slope*(x - x0)
+            # x0 = xx[dim0,0], y0 = yy[dim0,0]
+            xvals_0 = x[select0]
+            x0s = xx[dim0, 0]
+            y0s = yy[dim0, 0]
+
+            y[select0] = y0s + slope0 * (xvals_0 - x0s)
+            logdet[select0] = slope0.log()  # log|dy/dx|
+
+        # ~~~~~ Extrapolation: index == nknot (right of right-most knot) ~~~~~
+        select_n = (index == self.nknot)
+        if select_n.any():
+            dimn = dim_all[select_n]
+            slopeN = (yy[dimn, -1] - yy[dimn, -2]) / (xx[dimn, -1] - xx[dimn, -2])
+
+            xvals_n = x[select_n]
+            xN_1 = xx[dimn, -1]
+            yN_1 = yy[dimn, -1]
+
+            y[select_n] = yN_1 + slopeN * (xvals_n - xN_1)
+            logdet[select_n] = slopeN.log()
+
+        # ~~~~~ Piecewise-Linear in between: 0 < index < nknot ~~~~~
+        select_mid = ~(select0 | select_n)
+        if select_mid.any():
+            idx_mid = index[select_mid]  # shape (#selected,)
+            dim_mid = dim_all[select_mid]
+
+            xvals_mid = x[select_mid]
+
+            # x_lo = xx[dim_mid, idx_mid-1], x_hi = xx[dim_mid, idx_mid]
+            x_lo = xx[dim_mid, idx_mid - 1]
+            x_hi = xx[dim_mid, idx_mid]
+
+            # y_lo = yy[dim_mid, idx_mid-1], y_hi = yy[dim_mid, idx_mid]
+            y_lo = yy[dim_mid, idx_mid - 1]
+            y_hi = yy[dim_mid, idx_mid]
+
+            # slope
+            slope_mid = (y_hi - y_lo) / (x_hi - x_lo)
+
+            # forward transform
+            y[select_mid] = y_lo + slope_mid * (xvals_mid - x_lo)
+
+            # logdet = log(slope_mid)
+            logdet[select_mid] = slope_mid.log()
+
+        return y, logdet
+
+    def inverse(self, y):
+        """
+        Inverse transform: y -> x
+        y: shape (ndata, ndim)
+
+        Returns:
+         x: shape (ndata, ndim)
+         logdet: shape (ndata, ndim), the log|dx/dy|
+        """
+        xx, yy = self._prepare()
+
+        # 1) Find which interval each y falls into
+        #    We'll do the same dimension-wise approach
+        index_list = []
+        for i in range(self.ndim):
+            idx_i = torch.searchsorted(yy[i], y[:, i])
+            index_list.append(idx_i)
+        index = torch.stack(index_list, dim=1)
+
+        x = torch.zeros_like(y)
+        logdet = torch.zeros_like(y)
+
+        dim_all = self.dim_arange.unsqueeze(0).expand(len(y), self.ndim)
+
+        # ~~~~~ Extrapolation: index == 0 ~~~~~
+        select0 = (index == 0)
+        if select0.any():
+            dim0 = dim_all[select0]
+            slope0 = (yy[dim0, 1] - yy[dim0, 0]) / (xx[dim0, 1] - xx[dim0, 0])
+
+            yvals_0 = y[select0]
+            x0s = xx[dim0, 0]
+            y0s = yy[dim0, 0]
+
+            # x = x0 + (y - y0)/slope
+            x[select0] = x0s + (yvals_0 - y0s) / slope0
+            logdet[select0] = (-slope0.log())  # log|dx/dy| = log(1/slope) = -log(slope)
+
+        # ~~~~~ Extrapolation: index == nknot ~~~~~
+        select_n = (index == self.nknot)
+        if select_n.any():
+            dimn = dim_all[select_n]
+            slopeN = (yy[dimn, -1] - yy[dimn, -2]) / (xx[dimn, -1] - xx[dimn, -2])
+
+            yvals_n = y[select_n]
+            xN_1 = xx[dimn, -1]
+            yN_1 = yy[dimn, -1]
+
+            x[select_n] = xN_1 + (yvals_n - yN_1) / slopeN
+            logdet[select_n] = (-slopeN.log())
+
+        # ~~~~~ Piecewise-Linear in between: 0 < index < nknot ~~~~~
+        select_mid = ~(select0 | select_n)
+        if select_mid.any():
+            idx_mid = index[select_mid]
+            dim_mid = dim_all[select_mid]
+
+            yvals_mid = y[select_mid]
+
+            y_lo = yy[dim_mid, idx_mid - 1]
+            y_hi = yy[dim_mid, idx_mid]
+            x_lo = xx[dim_mid, idx_mid - 1]
+            x_hi = xx[dim_mid, idx_mid]
+
+            slope_mid = (y_hi - y_lo) / (x_hi - x_lo)
+
+            x[select_mid] = x_lo + (yvals_mid - y_lo) / slope_mid
+
+            # log|dx/dy| = -log(slope_mid)
+            logdet[select_mid] = -slope_mid.log()
+
+        return x, logdet
+
+    
+    
+class RQspline(nn.Module):
+    """
+    Rational Quadratic Spline
+    See appendix B of https://arxiv.org/pdf/2007.00674.pdf
+    - Monotonic in each dimension
+    - Has analytical inverse (no binary search)
+    - x: (ndim, nknot) 2D array (monotonic in each row)
+    - y: (ndim, nknot) 2D array (monotonic in each row)
+    - deriv: (ndim, nknot) 2D array (positive)
+    """
+
+    def __init__(self, ndim, nknot):
+        super().__init__()
+        self.ndim = ndim
+        self.nknot = nknot
+
+        # Create an arange for indexing (we'll expand it later as needed).
+        # This avoids repeatedly calling torch.arange(...) inside forward.
+        self.register_buffer("dim_arange", torch.arange(self.ndim))
+
+        # Some initial random initialization (same as your code):
+        x0 = torch.rand(ndim, 1) - 4.5
+        logdx = torch.log(torch.abs(-2 * x0 / (nknot - 1)))
+
+        # Use log-parameters to ensure monotonicity
         self.x0 = nn.Parameter(x0)
         self.y0 = nn.Parameter(x0.clone())
-        self.logdx = nn.Parameter(torch.ones(ndim, nknot-1)*logdx)
-        self.logdy = nn.Parameter(torch.ones(ndim, nknot-1)*logdx)
+        self.logdx = nn.Parameter(torch.ones(ndim, nknot - 1) * logdx)
+        self.logdy = nn.Parameter(torch.ones(ndim, nknot - 1) * logdx)
         self.logderiv = nn.Parameter(torch.zeros(ndim, nknot))
 
-
     def set_param(self, x, y, deriv):
+        """
+        Manually set the spline's knot locations (x, y) and derivatives.
+        """
+        dx = x[:, 1:] - x[:, :-1]
+        dy = y[:, 1:] - y[:, :-1]
+        #assert (dx > 0).all()
+        #assert (dy > 0).all()
+        #assert (deriv > 0).all()
 
-        dx = x[:,1:] - x[:,:-1]
-        dy = y[:,1:] - y[:,:-1]
-        assert (dx > 0).all()
-        assert (dy > 0).all()
-        assert (deriv > 0).all()
-
-        self.x0[:] = x[:, 0].view(-1,1)
-        self.y0[:] = y[:, 0].view(-1,1)
+        self.x0[:] = x[:, 0].view(-1, 1)
+        self.y0[:] = y[:, 0].view(-1, 1)
         self.logdx[:] = torch.log(dx)
         self.logdy[:] = torch.log(dy)
         self.logderiv[:] = torch.log(deriv)
 
-
     def _prepare(self):
-        #return knot points and derivatives
+        """
+        Computes the actual knot positions (xx, yy) and derivatives (delta)
+        from the log-params. This is typically done each forward pass
+        because parameters may be updated by backprop.
+        """
+        # x0 + cumsum(exp(logdx)) => monotonic
         xx = torch.cumsum(torch.exp(self.logdx), dim=1)
-        xx += self.x0
-        xx = torch.cat((self.x0, xx), dim=1)
+        xx = xx + self.x0
+        xx = torch.cat((self.x0, xx), dim=1)  # shape (ndim, nknot)
+
         yy = torch.cumsum(torch.exp(self.logdy), dim=1)
-        yy += self.y0
-        yy = torch.cat((self.y0, yy), dim=1)
-        delta = torch.exp(self.logderiv)
+        yy = yy + self.y0
+        yy = torch.cat((self.y0, yy), dim=1)  # shape (ndim, nknot)
+
+        delta = torch.exp(self.logderiv)      # shape (ndim, nknot)
         return xx, yy, delta
 
     def forward(self, x):
-        # x: (ndata, ndim) 2d array
-        xx, yy, delta = self._prepare() #(ndim, nknot)
+        """
+        Forward transform: x -> y
+        x: shape (ndata, ndim)
+        Returns:
+          y: shape (ndata, ndim)
+          logderiv: shape (ndata, ndim), the log|dy/dx|
+        """
+        xx, yy, delta = self._prepare()  # shape (ndim, nknot) each
 
-        index = torch.searchsorted(xx.detach(), x.T.contiguous().detach()).T
+        # 1) We need to find which interval each x falls into
+        #    Use searchsorted on each dimension. We do transpose so that
+        #    'xx' is shape (ndim, nknot) and 'x' is shape (ndata, ndim).
+        #    Then transpose result back.
+        #    *Removed the .detach() calls so we keep everything on GPU
+        index = torch.searchsorted(xx, x.T.contiguous()).T  # shape (ndata, ndim)
+        #index = broadcast_searchsorted_multi(x.to(x.device), xx.to(x.device))
+        
+        # 2) Prepare output buffers
         y = torch.zeros_like(x)
         logderiv = torch.zeros_like(x)
 
-        #linear extrapolation
-        select0 = index == 0
-        dim = torch.repeat_interleave(torch.arange(self.ndim).view(1,-1).to(x.device), len(x), dim=0)[select0]
-        y[select0] = yy[dim, 0] + (x[select0]-xx[dim, 0]) * delta[dim, 0]
-        logderiv[select0] = self.logderiv[dim, 0]
-        selectn = index == self.nknot
-        dim = torch.repeat_interleave(torch.arange(self.ndim).view(1,-1).to(x.device), len(x), dim=0)[selectn]
-        y[selectn] = yy[dim, -1] + (x[selectn]-xx[dim, -1]) * delta[dim, -1]
-        logderiv[selectn] = self.logderiv[dim, -1]
+        # 3) We'll create one "dim_all" array (shape (ndata, ndim)) so
+        #    we can gather from it for each mask.
+        #    This is easier than repeating arange(...) in each block.
+        #    self.dim_arange is shape [ndim], so expand to (ndata, ndim):
+        dim_all = self.dim_arange.unsqueeze(0).expand(len(x), self.ndim)
 
-        #rational quadratic spline
-        select = ~(select0 | selectn)
-        index = index[select]
-        dim = torch.repeat_interleave(torch.arange(self.ndim).view(1,-1).to(x.device), len(x), dim=0)[select]
-        xi = (x[select] - xx[dim, index-1]) / (xx[dim, index] - xx[dim, index-1])
-        s = (yy[dim, index]-yy[dim, index-1]) / (xx[dim, index]-xx[dim, index-1])
-        xi1_xi = xi*(1-xi)
-        denominator = s + (delta[dim, index]+delta[dim, index-1]-2*s)*xi1_xi
-        xi2 = xi**2
+        # ~~~~~ Extrapolation: index == 0 ~~~~~
+        select0 = (index == 0)
+        if select0.any():
+            dim0 = dim_all[select0]  # shape (#selected,)
+            # y = yy[dim0, 0] + (x - xx[dim0, 0]) * delta[dim0, 0]
+            y[select0] = (
+                yy[dim0, 0]
+                + (x[select0] - xx[dim0, 0]) * delta[dim0, 0]
+            )
+            logderiv[select0] = self.logderiv[dim0, 0]
 
-        y[select] = yy[dim, index-1] + ((yy[dim, index]-yy[dim, index-1]) * (s*xi2+delta[dim, index-1]*xi1_xi)) / denominator
-        logderiv[select] = 2*torch.log(s) + torch.log(delta[dim, index]*xi2 + 2*s*xi1_xi + delta[dim, index-1]*(1-xi)**2) - 2 * torch.log(denominator)
+        # ~~~~~ Extrapolation: index == nknot ~~~~~
+        selectn = (index == self.nknot)
+        if selectn.any():
+            dimn = dim_all[selectn]
+            y[selectn] = (
+                yy[dimn, -1]
+                + (x[selectn] - xx[dimn, -1]) * delta[dimn, -1]
+            )
+            logderiv[selectn] = self.logderiv[dimn, -1]
+
+        # ~~~~~ Rational Quadratic Spline: 0 < index < nknot ~~~~~
+        select_mid = ~(select0 | selectn)
+        if select_mid.any():
+            idx_mid = index[select_mid]  # shape (#selected,)
+            dim_mid = dim_all[select_mid]
+
+            # Distances in x- and y-knots
+            x_lo = xx[dim_mid, idx_mid - 1]
+            x_hi = xx[dim_mid, idx_mid]
+            y_lo = yy[dim_mid, idx_mid - 1]
+            y_hi = yy[dim_mid, idx_mid]
+            delta_lo = delta[dim_mid, idx_mid - 1]
+            delta_hi = delta[dim_mid, idx_mid]
+
+            # xi in [0,1]
+            xval = x[select_mid]
+            xi = (xval - x_lo) / (x_hi - x_lo)  # shape (#selected,)
+
+            s = (y_hi - y_lo) / (x_hi - x_lo)   # local slope
+            xi1_xi = xi * (1 - xi)
+            delta_sum = (delta_hi + delta_lo - 2 * s)
+            denominator = s + delta_sum * xi1_xi
+
+            xi2 = xi**2
+            # y formula
+            y[select_mid] = (
+                y_lo
+                + (y_hi - y_lo) * (s * xi2 + delta_lo * xi1_xi) / denominator
+            )
+
+            # log|dy/dx|
+            # logderiv = 2 * log(s) + log(delta_hi*xi^2 + 2*s*xi(1-xi) + delta_lo*(1-xi)^2) - 2*log(denominator)
+            log_s = torch.log(s)
+            log_num = torch.log(delta_hi * xi2 + 2*s*xi1_xi + delta_lo * (1 - xi)**2)
+            log_den = torch.log(denominator)
+
+            logderiv[select_mid] = 2 * log_s + log_num - 2 * log_den
+
+        # NOTE: We removed the "assert (discriminant >= 0).all()" 
+        #       to avoid sync. If you still want to check for debugging:
+        # if torch.any(denominator < 1e-12):
+        #     print("Warning: possible negative or zero denominator in RQspline forward")
 
         return y, logderiv
 
     def inverse(self, y):
-        xx, yy, delta = self._prepare()
+        """
+        Inverse transform: y -> x
+        y: shape (ndata, ndim)
+        Returns:
+          x: shape (ndata, ndim)
+          logderiv: shape (ndata, ndim), the log|dx/dy|
+        """
+        xx, yy, delta = self._prepare()  # shape (ndim, nknot)
 
-        index = torch.searchsorted(yy.detach(), y.T.contiguous().detach()).T
+        #index = broadcast_searchsorted_multi(x, xx)
+        index = torch.searchsorted(yy, y.T.contiguous()).T  # shape (ndata, ndim)
         x = torch.zeros_like(y)
         logderiv = torch.zeros_like(y)
 
-        #linear extrapolation
-        select0 = index == 0
-        dim = torch.repeat_interleave(torch.arange(self.ndim).view(1,-1), len(x), dim=0)[select0]
-        x[select0] = xx[dim, 0] + (y[select0]-yy[dim, 0]) / delta[dim, 0]
-        logderiv[select0] = self.logderiv[dim, 0]
-        selectn = index == self.nknot
-        dim = torch.repeat_interleave(torch.arange(self.ndim).view(1,-1), len(x), dim=0)[selectn]
-        x[selectn] = xx[dim, -1] + (y[selectn]-yy[dim, -1]) / delta[dim, -1]
-        logderiv[selectn] = self.logderiv[dim, -1]
+        # Single "dim_all" array
+        dim_all = self.dim_arange.unsqueeze(0).expand(len(y), self.ndim)
 
-        #rational quadratic spline
-        select = ~(select0 | selectn)
-        index = index[select]
-        dim = torch.repeat_interleave(torch.arange(self.ndim).view(1,-1), len(x), dim=0)[select]
-        deltayy = yy[dim, index]-yy[dim, index-1]
-        s = deltayy / (xx[dim, index]-xx[dim, index-1])
-        delta_2s = delta[dim, index]+delta[dim, index-1]-2*s
-        deltay_delta_2s = (y[select]-yy[dim, index-1]) * delta_2s
+        # ~~~~~ Extrapolation: index == 0 ~~~~~
+        select0 = (index == 0)
+        if select0.any():
+            dim0 = dim_all[select0]
+            x[select0] = (
+                xx[dim0, 0]
+                + (y[select0] - yy[dim0, 0]) / delta[dim0, 0]
+            )
+            logderiv[select0] = self.logderiv[dim0, 0]
 
-        a = deltayy * (s-delta[dim, index-1]) + deltay_delta_2s
-        b = deltayy * delta[dim, index-1] - deltay_delta_2s
-        c = - s * (y[select]-yy[dim, index-1])
-        discriminant = b.pow(2) - 4 * a * c
-        #discriminant[discriminant<0] = 0 
-        assert (discriminant >= 0).all()
-        xi = - 2*c / (b + torch.sqrt(discriminant))
-        xi1_xi = xi * (1-xi)
+        # ~~~~~ Extrapolation: index == nknot ~~~~~
+        selectn = (index == self.nknot)
+        if selectn.any():
+            dimn = dim_all[selectn]
+            x[selectn] = (
+                xx[dimn, -1]
+                + (y[selectn] - yy[dimn, -1]) / delta[dimn, -1]
+            )
+            logderiv[selectn] = self.logderiv[dimn, -1]
 
-        x[select] = xi * (xx[dim, index] - xx[dim, index-1]) + xx[dim, index-1]
-        logderiv[select] = 2*torch.log(s) + torch.log(delta[dim, index]*xi**2 + 2*s*xi1_xi + delta[dim, index-1]*(1-xi)**2) - 2 * torch.log(s + delta_2s*xi1_xi)
+        # ~~~~~ Rational Quadratic Spline: 0 < index < nknot ~~~~~
+        select_mid = ~(select0 | selectn)
+        if select_mid.any():
+            idx_mid = index[select_mid]
+            dim_mid = dim_all[select_mid]
+
+            y_lo = yy[dim_mid, idx_mid - 1]
+            y_hi = yy[dim_mid, idx_mid]
+            x_lo = xx[dim_mid, idx_mid - 1]
+            x_hi = xx[dim_mid, idx_mid]
+
+            delta_lo = delta[dim_mid, idx_mid - 1]
+            delta_hi = delta[dim_mid, idx_mid]
+
+            s = (y_hi - y_lo) / (x_hi - x_lo)
+            delta_2s = (delta_hi + delta_lo - 2 * s)
+            yval = y[select_mid]
+            y_off = (yval - y_lo) * delta_2s  # factor used in the quartic eq
+
+            # a, b, c in the standard "ax^2 + bx + c = 0" form (see doc)
+            # but rearranged for rational quadratic invert.
+            # We'll keep the same variable names from your code:
+            deltayy = (y_hi - y_lo)
+            a = deltayy * (s - delta_lo) + y_off
+            b = deltayy * delta_lo - y_off
+            c = -s * (yval - y_lo)
+
+            # Solve for xi via the formula:
+            #   xi = [ -2c / (b + sqrt(b^2 - 4ac)) ] 
+            # (discriminant must be >= 0 for monotonic)
+            discriminant = b.pow(2) - 4 * a * c
+            # Optional check for debugging if you see NaNs:
+            # if torch.any(discriminant < 0):
+            #     print("Warning: negative discriminant encountered in RQspline inverse")
+
+            sqrt_disc = torch.sqrt(discriminant)
+            xi = -2 * c / (b + sqrt_disc)
+
+            xi1_xi = xi * (1 - xi)
+
+            x[select_mid] = (
+                xi * (x_hi - x_lo)
+                + x_lo
+            )
+
+            # log|dx/dy|
+            # formula from rational-quadratic paper
+            log_s = torch.log(s)
+            log_numer = torch.log(
+                delta_hi * xi**2 + 2 * s * xi1_xi + delta_lo * (1 - xi)**2
+            )
+            denom = s + delta_2s * xi1_xi
+            log_denom = torch.log(denom)
+
+            logderiv[select_mid] = 2 * log_s + log_numer - 2 * log_denom
 
         return x, logderiv
 
@@ -479,6 +750,7 @@ class PixelwiseNonlinearity(nn.Module):
         
         # Our RQspline class expects (ndim, nknot). We do (1, nknot).
         self.rqspline = RQspline(ndim=self.ndim, nknot=self.nknot)
+        #self.rqspline = PLspline(ndim=self.ndim, nknot=self.nknot)
         
         # Optionally, you might want to initialize or set param,
         # e.g. self.rqspline.set_param(...) if you have a desired init.

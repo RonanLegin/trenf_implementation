@@ -30,8 +30,7 @@ class InvariantFlowModel(nn.Module):
         # -- Build the flow layers --
         layers = []
         for _ in range(n_layers):
-            layers.append(CubicSplineRadialFourierConv(image_shape=image_shape, num_knots=8))#RadialFourierConv(image_shape=image_shape))
-            #layers.append(ActNorm2d(image_shape[0], 1.0))
+            layers.append(CubicSplineRadialFourierConv(image_shape=image_shape, num_knots=8))
             layers.append(PixelwiseNonlinearity())
         self.layers = nn.ModuleList(layers)
 
