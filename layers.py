@@ -735,25 +735,19 @@ class PixelwiseNonlinearity(nn.Module):
     to each pixel value. This is a 'normalizing flow' style transformation:
         - forward(...)  :  x -> y = spline(x)
         - forward(..., reverse=True):  y -> x = spline^{-1}(y)
-    
-    The RQspline is from your snippet. We'll wrap it so that each pixel is treated as
-    dimension=1 in that spline.
     """
-    def __init__(self, nknot=8):
+    def __init__(self, ndim=1, nknot=8):
         """
         nknot: number of knots in the rational-quadratic spline.
         """
         super().__init__()
         
-        self.ndim = 1  
+        self.ndim = ndim  
         self.nknot = nknot
         
         # Our RQspline class expects (ndim, nknot). We do (1, nknot).
         self.rqspline = RQspline(ndim=self.ndim, nknot=self.nknot)
         #self.rqspline = PLspline(ndim=self.ndim, nknot=self.nknot)
-        
-        # Optionally, you might want to initialize or set param,
-        # e.g. self.rqspline.set_param(...) if you have a desired init.
 
     def forward(self, x, logdet=None, reverse=False):
         """
@@ -820,6 +814,7 @@ class PixelwiseNonlinearity(nn.Module):
         logdet = logdet + local_logdet
         
         return out, logdet
+    
     
 class _ActNorm(nn.Module):
     """

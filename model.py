@@ -9,15 +9,19 @@ class InvariantFlowModel(nn.Module):
     """
     A simple normalizing flow that stacks radial Fourier conv layers
     and pixelwise nonlinearities to achieve translation+rotation invariance,
-    with an optional learnable top prior (similar to Glow).
+    with an optional learnable top prior.
     """
     def __init__(self,
                  image_shape=(1,64,64),
                  n_layers=4,
+                 n_kernel_knots=8,
+                 n_nonlinearity_knots=8,
                  learn_top=False):
         """
         image_shape: (C, H, W)
         n_layers: number of (FourierConv + Nonlinearity) pairs
+        n_kernel_knots: number of knots in the FourierConv radial basis
+        n_nonlinearity_knots: number of knots in the PixelwiseNonlinearity
         learn_top: if True, we learn a convolution that predicts mean, log_scale
                    of the prior in the latent space.
         """
@@ -26,12 +30,14 @@ class InvariantFlowModel(nn.Module):
         self.image_shape = image_shape
         self.n_layers = n_layers
         self.learn_top = learn_top
+        self.n_kernel_knots = n_kernel_knots
+        self.n_nonlinearity_knots = n_nonlinearity_knots
 
         # -- Build the flow layers --
         layers = []
         for _ in range(n_layers):
-            layers.append(CubicSplineRadialFourierConv(image_shape=image_shape, num_knots=8))
-            layers.append(PixelwiseNonlinearity())
+            layers.append(CubicSplineRadialFourierConv(image_shape=image_shape, num_knots=n_kernel_knots))
+            layers.append(PixelwiseNonlinearity(ndim=image_shape[0], nknot=n_nonlinearity_knots))
         self.layers = nn.ModuleList(layers)
 
         # -- Register a buffer for the 'prior_h' (like Glow's top-h).
