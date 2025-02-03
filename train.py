@@ -6,7 +6,7 @@ from importlib.machinery import SourceFileLoader
 from torch.utils.data import TensorDataset, DataLoader
 
 import torch.optim as optim
-from src.model import InvariantFlowModel
+from trenf import InvariantFlowModel
 
 import argparse
 import time
@@ -26,7 +26,7 @@ def main(args):
         os.makedirs("saves/")
 
     p = SourceFileLoader('cf', 'config.py').load_module()
-    model = InvariantFlowModel(image_shape=p.imShape, n_layers=p.n_layers, learn_top=p.y_learn_top).to(device)
+    model = InvariantFlowModel(image_shape=p.imShape, n_layers=p.n_layers, n_kernel_knots=p.n_kernel_knots, n_nonlinearity_knots=p.n_nonlinearity_knots, learn_top=p.y_learn_top).to(device)
     print(sum(p.numel() for p in model.parameters() if p.requires_grad), ' Parameters')
     model.train()
 
@@ -40,7 +40,7 @@ def main(args):
 
     lowest = 1e7
     model.train()
-    epochs = 50
+    epochs = 2000
 
     for ep in range(epochs):
         ep_loss = []

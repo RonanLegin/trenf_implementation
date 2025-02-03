@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
-from src.layers import RadialFourierConv, PixelwiseNonlinearity, Conv2dZeros, ActNorm2d,CubicSplineRadialFourierConv
-from src.utils import gaussian_likelihood
+from .layers import RadialFourierConv, PixelwiseNonlinearity, Conv2dZeros, ActNorm2d,CubicSplineRadialFourierConv
+from .utils import gaussian_likelihood
 
 
 
@@ -135,10 +135,16 @@ class InvariantFlowModel(nn.Module):
         else:
             bsz = z.shape[0]
 
+
         # Now invert the flow layers in reverse order
         x = z
         logdet = torch.zeros(bsz, device=z.device, dtype=z.dtype)
         for layer in reversed(self.layers):
             x, logdet = layer(x, logdet=logdet, reverse=True)
 
-        return x, logdet
+        # 2) Compute log p(z) under prior
+        mean, logs = self.prior(bsz)  # shape => (b, c, h, w) each
+        # Gaussian likelihood
+        log_pz = gaussian_likelihood(mean, logs, z)
+
+        return x, -logdet + log_pz

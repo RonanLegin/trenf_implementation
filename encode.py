@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from src.model import InvariantFlowModel
+from trenf import InvariantFlowModel
 from importlib.machinery import SourceFileLoader
 import argparse
 
@@ -20,10 +20,11 @@ def encode(args, model, device, num_samples=8, image_shape=(1, 64, 64)):
     z_samples = z_samples.detach().cpu().numpy()
 
     fig, axs = plt.subplots(2, num_samples, figsize=(15, 4))
+    fig.suptitle('First row: Real Kappa Maps, Second row: Latent Encoding', fontsize=16)
 
     # Plot x samples in the first row
     for i in range(num_samples):
-        im = axs[0, i].imshow(x[i].cpu().numpy().squeeze())
+        im = axs[0, i].imshow(x[i].cpu().numpy().squeeze(), vmin=-0.7, vmax=1.7)
         axs[0, i].axis('off')  # Turn off axis
 
     # Plot z samples in the second row
@@ -33,6 +34,7 @@ def encode(args, model, device, num_samples=8, image_shape=(1, 64, 64)):
 
     fig.colorbar(im, ax=axs, orientation='horizontal', fraction=0.02, pad=0.04)
     plt.show()
+    #plt.savefig('encode.png')
 
 if __name__ == "__main__":
     
@@ -44,7 +46,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     p = SourceFileLoader('cf', 'config.py').load_module()
-    model = InvariantFlowModel(image_shape=p.imShape, n_layers=p.n_layers, learn_top=p.y_learn_top).to(device)
+    model = InvariantFlowModel(image_shape=p.imShape, n_layers=p.n_layers, n_kernel_knots=p.n_kernel_knots, n_nonlinearity_knots=p.n_nonlinearity_knots, learn_top=p.y_learn_top).to(device)
     print(sum(p.numel() for p in model.parameters() if p.requires_grad), ' Parameters')
     model.load_state_dict(torch.load(args.model_path, map_location=torch.device('cpu')))
     model.eval() 
