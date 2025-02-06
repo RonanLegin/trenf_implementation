@@ -111,12 +111,22 @@ class CubicSplineRadialFourierConv(nn.Module):
         
         # The knot values (y) are the actual trainable parameters:
         # Initialize them to 1.0 + small noise, for example.
-        self.knot_y = nn.Parameter(
-            torch.ones(num_knots, dtype=torch.float32) 
-            + 0.1 * torch.randn(num_knots)
-        )
+        #self.knot_y = torch.ones(num_knots, dtype=torch.float32)
 
-    def forward(self, x, logdet=None, reverse=False):
+        self.num_params = num_knots
+
+    # def set_params(self, params):
+    #     """
+    #     Replace the trainable knot vector with new_params.
+    #     new_params should be a 1D tensor of length self.num_knots.
+    #     """
+    #     self.knot_y = params.reshape(self.num_knots).detach().clone()
+
+    def get_params(self, params):
+        knot_y = params[:self.num_params]
+        return knot_y
+
+    def forward(self, x, params, logdet=None, reverse=False):
         """
         x: (batch, channels, H, W) real tensor
         logdet: either None or cumulative log determinant so far
@@ -126,6 +136,8 @@ class CubicSplineRadialFourierConv(nn.Module):
         if logdet is None:
             logdet = torch.zeros(x.size(0), device=device)
         
+        knot_y = self.get_params(params)
+
         # 1) FFT
         X = fft.fftn(x, dim=(-2, -1))  # shape (batch, channels, H, W), complex
         
@@ -137,7 +149,7 @@ class CubicSplineRadialFourierConv(nn.Module):
         # We'll do it elementwise. r_norm has shape [W,H].
         # We can flatten, evaluate, reshape.
         r_norm_flat = r_norm.reshape(-1)
-        kernel_flat = catmull_rom_spline_1d(r_norm_flat, self.knot_x, self.knot_y)
+        kernel_flat = catmull_rom_spline_1d(r_norm_flat, self.knot_x, knot_y)
         kernel_2d = kernel_flat.view_as(r_norm)  # shape [W,H]
         
         # Expand to broadcast over (batch, channels, W, H)
@@ -498,47 +510,70 @@ class RQspline(nn.Module):
         logdx = torch.log(torch.abs(-2 * x0 / (nknot - 1)))
 
         # Use log-parameters to ensure monotonicity
-        self.x0 = nn.Parameter(x0)
-        self.y0 = nn.Parameter(x0.clone())
-        self.logdx = nn.Parameter(torch.ones(ndim, nknot - 1) * logdx)
-        self.logdy = nn.Parameter(torch.ones(ndim, nknot - 1) * logdx)
-        self.logderiv = nn.Parameter(torch.zeros(ndim, nknot))
+        # self.x0 = nn.Parameter(x0)
+        # self.y0 = nn.Parameter(x0.clone())
+        # self.logdx = nn.Parameter(torch.ones(ndim, nknot - 1) * logdx)
+        # self.logdy = nn.Parameter(torch.ones(ndim, nknot - 1) * logdx)
+        # self.logderiv = nn.Parameter(torch.zeros(ndim, nknot))
 
-    def set_param(self, x, y, deriv):
+        # self.x0 = x0
+        # self.y0 = x0.clone()
+        # self.logdx = torch.ones(ndim, nknot - 1) * logdx
+        # self.logdy = torch.ones(ndim, nknot - 1) * logdx
+        # self.logderiv = torch.zeros(ndim, nknot)
+
+
+    def get_params(self, params):
         """
-        Manually set the spline's knot locations (x, y) and derivatives.
+        Takes a 1D vector of parameters and splits it into x0, y0, logdx, logdy, logderiv.
         """
-        dx = x[:, 1:] - x[:, :-1]
-        dy = y[:, 1:] - y[:, :-1]
-        #assert (dx > 0).all()
-        #assert (dy > 0).all()
-        #assert (deriv > 0).all()
+        offset = 0
+        n = self.ndim
+        
+        # x0
+        x0 = params[offset : offset + n].view(n, 1)
+        offset += n
 
-        self.x0[:] = x[:, 0].view(-1, 1)
-        self.y0[:] = y[:, 0].view(-1, 1)
-        self.logdx[:] = torch.log(dx)
-        self.logdy[:] = torch.log(dy)
-        self.logderiv[:] = torch.log(deriv)
+        # y0
+        y0 = params[offset : offset + n].view(n, 1)
+        offset += n
 
-    def _prepare(self):
+        # logdx
+        size_logdx = n * (self.nknot - 1)
+        logdx = params[offset : offset + size_logdx].view(n, self.nknot - 1)
+        offset += size_logdx
+
+        # logdy
+        size_logdy = n * (self.nknot - 1)
+        logdy = params[offset : offset + size_logdy].view(n, self.nknot - 1)
+        offset += size_logdy
+
+        # logderiv
+        size_logder = n * self.nknot
+        logderiv = params[offset : offset + size_logder].view(n, self.nknot)
+        offset += size_logder
+
+        return x0, y0, logdx, logdy, logderiv
+
+    def _prepare(self, x0, y0, logdx, logdy, logderiv):
         """
         Computes the actual knot positions (xx, yy) and derivatives (delta)
         from the log-params. This is typically done each forward pass
         because parameters may be updated by backprop.
         """
         # x0 + cumsum(exp(logdx)) => monotonic
-        xx = torch.cumsum(torch.exp(self.logdx), dim=1)
-        xx = xx + self.x0
-        xx = torch.cat((self.x0, xx), dim=1)  # shape (ndim, nknot)
+        xx = torch.cumsum(torch.exp(logdx), dim=1)
+        xx = xx + x0
+        xx = torch.cat((x0, xx), dim=1)  # shape (ndim, nknot)
 
-        yy = torch.cumsum(torch.exp(self.logdy), dim=1)
-        yy = yy + self.y0
-        yy = torch.cat((self.y0, yy), dim=1)  # shape (ndim, nknot)
+        yy = torch.cumsum(torch.exp(logdy), dim=1)
+        yy = yy + y0
+        yy = torch.cat((y0, yy), dim=1)  # shape (ndim, nknot)
 
-        delta = torch.exp(self.logderiv)      # shape (ndim, nknot)
+        delta = torch.exp(logderiv)      # shape (ndim, nknot)
         return xx, yy, delta
 
-    def forward(self, x):
+    def forward(self, x, params):
         """
         Forward transform: x -> y
         x: shape (ndata, ndim)
@@ -546,7 +581,9 @@ class RQspline(nn.Module):
           y: shape (ndata, ndim)
           logderiv: shape (ndata, ndim), the log|dy/dx|
         """
-        xx, yy, delta = self._prepare()  # shape (ndim, nknot) each
+
+        x0, y0, logdx, logdy, logderiv = self.get_params(params)
+        xx, yy, delta = self._prepare(x0, y0, logdx, logdy, logderiv)  # shape (ndim, nknot) each
 
         # 1) We need to find which interval each x falls into
         #    Use searchsorted on each dimension. We do transpose so that
@@ -558,7 +595,7 @@ class RQspline(nn.Module):
         
         # 2) Prepare output buffers
         y = torch.zeros_like(x)
-        logderiv = torch.zeros_like(x)
+        new_logderiv = torch.zeros_like(x)
 
         # 3) We'll create one "dim_all" array (shape (ndata, ndim)) so
         #    we can gather from it for each mask.
@@ -575,7 +612,7 @@ class RQspline(nn.Module):
                 yy[dim0, 0]
                 + (x[select0] - xx[dim0, 0]) * delta[dim0, 0]
             )
-            logderiv[select0] = self.logderiv[dim0, 0]
+            new_logderiv[select0] = logderiv[dim0, 0]
 
         # ~~~~~ Extrapolation: index == nknot ~~~~~
         selectn = (index == self.nknot)
@@ -585,7 +622,7 @@ class RQspline(nn.Module):
                 yy[dimn, -1]
                 + (x[selectn] - xx[dimn, -1]) * delta[dimn, -1]
             )
-            logderiv[selectn] = self.logderiv[dimn, -1]
+            new_logderiv[selectn] = logderiv[dimn, -1]
 
         # ~~~~~ Rational Quadratic Spline: 0 < index < nknot ~~~~~
         select_mid = ~(select0 | selectn)
@@ -623,16 +660,16 @@ class RQspline(nn.Module):
             log_num = torch.log(delta_hi * xi2 + 2*s*xi1_xi + delta_lo * (1 - xi)**2)
             log_den = torch.log(denominator)
 
-            logderiv[select_mid] = 2 * log_s + log_num - 2 * log_den
+            new_logderiv[select_mid] = 2 * log_s + log_num - 2 * log_den
 
         # NOTE: We removed the "assert (discriminant >= 0).all()" 
         #       to avoid sync. If you still want to check for debugging:
         # if torch.any(denominator < 1e-12):
         #     print("Warning: possible negative or zero denominator in RQspline forward")
 
-        return y, logderiv
+        return y, new_logderiv
 
-    def inverse(self, y):
+    def inverse(self, y, params):
         """
         Inverse transform: y -> x
         y: shape (ndata, ndim)
@@ -640,12 +677,14 @@ class RQspline(nn.Module):
           x: shape (ndata, ndim)
           logderiv: shape (ndata, ndim), the log|dx/dy|
         """
-        xx, yy, delta = self._prepare()  # shape (ndim, nknot)
+        x0, y0, logdx, logdy, logderiv = self.get_params(params)
+        xx, yy, delta = self._prepare(x0, y0, logdx, logdy, logderiv)  # shape (ndim, nknot) each
+        #xx, yy, delta = self._prepare()  # shape (ndim, nknot)
 
         #index = broadcast_searchsorted_multi(x, xx)
         index = torch.searchsorted(yy, y.T.contiguous()).T  # shape (ndata, ndim)
         x = torch.zeros_like(y)
-        logderiv = torch.zeros_like(y)
+        new_logderiv = torch.zeros_like(y)
 
         # Single "dim_all" array
         dim_all = self.dim_arange.unsqueeze(0).expand(len(y), self.ndim)
@@ -658,7 +697,7 @@ class RQspline(nn.Module):
                 xx[dim0, 0]
                 + (y[select0] - yy[dim0, 0]) / delta[dim0, 0]
             )
-            logderiv[select0] = self.logderiv[dim0, 0]
+            new_logderiv[select0] = logderiv[dim0, 0]
 
         # ~~~~~ Extrapolation: index == nknot ~~~~~
         selectn = (index == self.nknot)
@@ -668,7 +707,7 @@ class RQspline(nn.Module):
                 xx[dimn, -1]
                 + (y[selectn] - yy[dimn, -1]) / delta[dimn, -1]
             )
-            logderiv[selectn] = self.logderiv[dimn, -1]
+            new_logderiv[selectn] = logderiv[dimn, -1]
 
         # ~~~~~ Rational Quadratic Spline: 0 < index < nknot ~~~~~
         select_mid = ~(select0 | selectn)
@@ -724,9 +763,9 @@ class RQspline(nn.Module):
             denom = s + delta_2s * xi1_xi
             log_denom = torch.log(denom)
 
-            logderiv[select_mid] = 2 * log_s + log_numer - 2 * log_denom
+            new_logderiv[select_mid] = 2 * log_s + log_numer - 2 * log_denom
 
-        return x, logderiv
+        return x, new_logderiv
 
 
 class PixelwiseNonlinearity(nn.Module):
@@ -747,9 +786,12 @@ class PixelwiseNonlinearity(nn.Module):
         
         # Our RQspline class expects (ndim, nknot). We do (1, nknot).
         self.rqspline = RQspline(ndim=self.ndim, nknot=self.nknot)
+
+        self.num_params = 2 * ndim + 2 * (ndim * nknot - 1) + ndim * nknot
         #self.rqspline = PLspline(ndim=self.ndim, nknot=self.nknot)
 
-    def forward(self, x, logdet=None, reverse=False):
+
+    def forward(self, x, params, logdet=None, reverse=False):
         """
         x: Tensor of shape (B, C, H, W) or any shape [B, *spatial_dims].
         logdet: Tensor of shape (B,) or None
@@ -777,12 +819,12 @@ class PixelwiseNonlinearity(nn.Module):
         # 3) Forward or Inverse through RQspline
         if not reverse:
             # forward transform: y, log|dy/dx|
-            y_flat, logabsdet_flat = self.rqspline.forward(x_flat)
+            y_flat, logabsdet_flat = self.rqspline.forward(x_flat, params)
             # y_flat: (B*N_pixels, 1)
             # logabsdet_flat: (B*N_pixels, 1) or (B*N_pixels,) depending on your RQspline code
         else:
             # inverse transform: x = rqspline^{-1}(y)
-            y_flat, logabsdet_flat = self.rqspline.inverse(x_flat)
+            y_flat, logabsdet_flat = self.rqspline.inverse(x_flat, params)
             # y_flat: same shape as x_flat
             # logabsdet_flat: same shape as well
 
